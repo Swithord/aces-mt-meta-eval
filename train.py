@@ -5,7 +5,7 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 
 from loss import PairwiseRankingLoss, L2RegularizationLoss
-from model import LinearRankingModel, MLPRankingModel
+from model import LinearRankingModel, MLPRankingModel, SoftConditionalRankingModel, MLPRouterModel
 from data import TranslationRankingDataset
 from evaluation import evaluate_metrics
 
@@ -134,11 +134,44 @@ if __name__ == "__main__":
     metrics = ["bleu-score", "chrf-score", "ter-score", "bertscore", "bleurt", "comet"]
     file_name = "metric_data_2_with_labels.csv"
     label_column = "label"  # The name of the column in the CSV containing labels
-    output_model_name = "linear_ranking_model.pth"
+    error_types = sorted(
+        {'addition', 'do-not-translate', 'mistranslation', 'omission', 'overtranslation', 'punctuation',
+         'real-world-knowledge', 'undertranslation', 'untranslated', 'wrong-language'})
+    model_configuration = 3 # Change this variable to switch between different model architectures (1 = linear, 2 = MLP, 3 = soft conditional)
+    soft_configuration = 2  # Change this variable to switch between different configurations (1, 2, 3, or 4)
 
-    model = LinearRankingModel()
-    # If you want to play around, use the neural network model
-    # model = MLPRankingModel()
+    if model_configuration == 1:
+        model = LinearRankingModel()
+        output_model_name = "linear_ranking_model.pth"
+    elif model_configuration == 2:
+        model = MLPRankingModel()
+        output_model_name = "mlp_ranking_model.pth"
+    elif model_configuration == 3:
+        # Soft conditional ranking model is a more complex model that can learn to route different types of mistranslations to different sub-models
+        if soft_configuration >= 3:
+            router = MLPRouterModel(n_metrics=len(metrics), hidden_size=16, n_error_types=len(error_types))
+            router.load_state_dict(torch.load("router_model.pth"))
+        if soft_configuration % 2 == 0:
+            ranking_models = []
+            for error_type in error_types:
+                model = LinearRankingModel()
+                model.load_state_dict(torch.load(f"linear_ranking_model_{error_type}.pth"))
+                ranking_models.append(model)
+        if soft_configuration == 1:
+            # Configuration 1: No pre-trained models
+            model = SoftConditionalRankingModel(n_metrics=len(metrics), hidden_size=16, n_error_types=10)
+        elif soft_configuration == 2:
+            # Configuration 2: Pre-trained ranking models
+            model = SoftConditionalRankingModel(n_metrics=len(metrics), hidden_size=16, n_error_types=10, ranking_models=ranking_models)
+        elif soft_configuration == 3:
+            # Configuration 3: Pre-trained router
+            model = SoftConditionalRankingModel(n_metrics=len(metrics), hidden_size=16, n_error_types=len(error_types), router=router)
+        elif soft_configuration == 4:
+            # Configuration 4: Pre-trained ranking models and router
+            model = SoftConditionalRankingModel(n_metrics=len(metrics), ranking_models=ranking_models, router=router)
+            # In this case, there is nothing to train
+            trained_model = model
+        output_model_name = "soft_conditional_ranking_model.pth"
 
     dataset = TranslationRankingDataset(csv_file=file_name, label_column="label", metric_columns=metrics)
     # Split the dataset into train - val - test sets (80% train, 10% val, 10% test)
@@ -151,10 +184,11 @@ if __name__ == "__main__":
         'batch_size': 64,   # Number of rows to process together. Larger size -> more stable but slower updates.
         'learning_rate': 0.0001,    # How much to update the weights. Too high -> unstable training, too low -> slow.
         'margin': 0.1,  # Minimum difference we want between the score for the correct and incorrect translations. Larger margin -> more aggressive ranking, smaller margin -> more lenient.
-        'lambda_reg': 0.01  # Strength of penalty for large weights. Too high -> underfit (i.e. doesn't perform well on training data), too low -> overfit (i.e. performs well on training data but poorly on unseen data). Both are equally bad.
+        'lambda_reg': 0.001  # Strength of penalty for large weights. Too high -> underfit (i.e. doesn't perform well on training data), too low -> overfit (i.e. performs well on training data but poorly on unseen data). Both are equally bad.
     }
     # Train the model
-    trained_model = train_model(model, train, val, **hyperparameters)
+    if soft_configuration != 4:
+        trained_model = train_model(model, train, val, **hyperparameters)
     torch.save(trained_model.state_dict(), output_model_name)
 
     # Evaluate each metric, and our new meta-metric, on the test set.
